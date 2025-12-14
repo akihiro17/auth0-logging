@@ -11,16 +11,4 @@ terraform.tfvars.json
 # Local build artifacts
 .tmp/
 
-# Node (auth0Logging/)
-auth0Logging/node_modules/
-auth0Logging/npm-debug.log*
-auth0Logging/yarn-debug.log*
-auth0Logging/yarn-error.log*
-auth0Logging/pnpm-debug.log*
-auth0Logging/.nyc_output/
-auth0Logging/coverage/
-auth0Logging/.cache/
-auth0Logging/dist/
-auth0Logging/.env*
-
 .vscode/
