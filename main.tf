@@ -188,9 +188,6 @@ data "archive_file" "function_zip" {
   output_path = "${path.module}/.tmp/function.zip"
 
   excludes = [
-    ".git",
-    ".vscode",
-    "*.DS_Store",
     "local.settings.json",
     "node_modules/**",
     ".npm/**",
@@ -204,7 +201,12 @@ resource "terraform_data" "deploy_functions" {
 
   provisioner "local-exec" {
     command = <<-EOT
-    az functionapp deployment source config-zip --src ${data.archive_file.function_zip.output_path} --resource-group ${local.resource_group_name} --name ${azurerm_function_app_flex_consumption.example.name} --timeout 180
+    az functionapp deployment source config-zip \
+    --src ${data.archive_file.function_zip.output_path} \
+    --resource-group ${local.resource_group_name} \
+    --name ${azurerm_function_app_flex_consumption.example.name} \
+    --timeout 180 \
+    --build-remote true
     EOT
   }
 
