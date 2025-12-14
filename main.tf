@@ -1,0 +1,187 @@
+locals {
+  tenant_id           = "d6d6228a-e151-4681-a6d9-15f173216357"
+  subscription_id     = "4147c8a6-6335-4feb-a202-42f97df0f3f5"
+  resource_group_name = "example"
+  location            = "japaneast"
+
+  # auth0 settings
+  auth0_domain = "dev-al4ff38otkzu2mx6.us.auth0.com"
+}
+
+resource "azurerm_resource_group" "example" {
+  location = local.location
+  name     = local.resource_group_name
+}
+
+resource "azurerm_storage_account" "log" {
+  name                     = "exampleforlogarchive"
+  resource_group_name      = azurerm_resource_group.example.name
+  location                 = azurerm_resource_group.example.location
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
+
+  shared_access_key_enabled       = false
+  allow_nested_items_to_be_public = false
+
+  public_network_access_enabled = true
+}
+
+resource "azurerm_storage_account" "example" {
+  name                     = "exampleauthlogstream"
+  resource_group_name      = azurerm_resource_group.example.name
+  location                 = azurerm_resource_group.example.location
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
+
+  shared_access_key_enabled       = false
+  allow_nested_items_to_be_public = false
+
+  public_network_access_enabled = true
+}
+
+resource "azurerm_storage_container" "example" {
+  name                  = "example-container"
+  storage_account_id    = azurerm_storage_account.example.id
+  container_access_type = "private"
+}
+
+resource "azurerm_service_plan" "example" {
+  name                = "example-app-service-plan"
+  resource_group_name = azurerm_resource_group.example.name
+  location            = azurerm_resource_group.example.location
+  os_type             = "Linux"
+  sku_name            = "FC1" # Flex Consumption SKU
+}
+
+resource "azurerm_application_insights" "example" {
+  name                = "example-appinsights"
+  location            = azurerm_resource_group.example.location
+  resource_group_name = azurerm_resource_group.example.name
+  application_type    = "Node.JS"
+}
+
+resource "azurerm_function_app_flex_consumption" "example" {
+  name                = "auth0-logging-example"
+  resource_group_name = azurerm_resource_group.example.name
+  location            = azurerm_resource_group.example.location
+  service_plan_id     = azurerm_service_plan.example.id
+
+  storage_container_type      = "blobContainer"
+  storage_container_endpoint  = "${azurerm_storage_account.example.primary_blob_endpoint}${azurerm_storage_container.example.name}"
+  storage_authentication_type = "SystemAssignedIdentity"
+  runtime_name                = "node"
+  runtime_version             = "20"
+  maximum_instance_count      = 40
+  instance_memory_in_mb       = 2048
+
+  identity {
+    type = "SystemAssigned"
+  }
+
+  site_config {
+    application_insights_connection_string = azurerm_application_insights.example.connection_string
+  }
+
+  app_settings = {
+    # workaround for the azure terraform provider issue
+    # ref. https://github.com/hashicorp/terraform-provider-azurerm/issues/30732#issuecomment-3360715578
+    "AzureWebJobsStorage" = null
+
+    "AzureWebJobsStorage__accountName"    = azurerm_storage_account.log.name
+    "AzureWebJobsStorage__blobServiceUri" = azurerm_storage_account.log.primary_blob_endpoint
+    "AzureWebJobsStorage__credential"     = "managedidentity"
+  }
+
+  # `az functionapp deployment` mutates these values after deploy; ignore them to keep plans clean.
+  lifecycle {
+    ignore_changes = [
+      tags["hidden-link: /app-insights-resource-id"],
+    ]
+  }
+
+  # `zip_deploy_file` does not work with Flex Consumption plan
+  # ref. https://learn.microsoft.com/en-us/azure/azure-functions/functions-deployment-technologies?tabs=linux#deployment-technology-availability
+  # ref. https://github.com/hashicorp/terraform-provider-azurerm/issues/29630
+  # zip_deploy_file = data.archive_file.function_zip.output_path
+}
+
+resource "azurerm_role_assignment" "storage_for_function" {
+  role_definition_name = "Storage Blob Data Owner"
+  scope                = azurerm_storage_account.example.id
+  principal_id         = azurerm_function_app_flex_consumption.example.identity[0].principal_id
+}
+
+resource "azurerm_role_assignment" "log_storage_for_function" {
+  role_definition_name = "Storage Blob Data Owner"
+  scope                = azurerm_storage_account.log.id
+  principal_id         = azurerm_function_app_flex_consumption.example.identity[0].principal_id
+}
+
+data "azapi_resource" "partner_topic" {
+  type      = "Microsoft.EventGrid/partnerTopics@2022-06-15"
+  name      = auth0_log_stream.example.sink[0].azure_partner_topic
+  parent_id = azurerm_resource_group.example.id
+}
+
+resource "azapi_resource_action" "activate_partner_topic" {
+  type        = "Microsoft.EventGrid/partnerTopics@2022-06-15"
+  resource_id = data.azapi_resource.partner_topic.id
+  action      = "activate"
+  method      = "POST"
+
+  body = {}
+}
+
+
+resource "azapi_resource" "event_subscription" {
+  type      = "Microsoft.EventGrid/partnerTopics/eventSubscriptions@2022-06-15"
+  name      = "example-event-subscription"
+  parent_id = data.azapi_resource.partner_topic.id
+
+  body = {
+    properties = {
+      destination = {
+        endpointType = "AzureFunction"
+        properties = {
+          resourceId = "${azurerm_function_app_flex_consumption.example.id}/functions/${azurerm_function_app_flex_consumption.example.name}"
+        }
+      }
+      eventDeliverySchema = "CloudEventSchemaV1_0"
+    }
+  }
+
+  depends_on = [
+    azapi_resource_action.activate_partner_topic,
+    azurerm_function_app_flex_consumption.example,
+    terraform_data.deploy_functions,
+  ]
+}
+
+data "archive_file" "function_zip" {
+  type        = "zip"
+  source_dir  = "./auth0Logging"
+  output_path = "${path.module}/.tmp/function.zip"
+
+  excludes = [
+    ".git",
+    ".vscode",
+    "*.DS_Store",
+    "local.settings.json",
+  ]
+}
+
+resource "terraform_data" "deploy_functions" {
+  triggers_replace = {
+    zip_file_path = data.archive_file.function_zip.output_md5
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+    az functionapp deployment source config-zip --src ${data.archive_file.function_zip.output_path} --resource-group ${local.resource_group_name} --name ${azurerm_function_app_flex_consumption.example.name} --timeout 180
+    EOT
+  }
+
+  depends_on = [
+    azurerm_role_assignment.storage_for_function,
+  ]
+}
