@@ -1,11 +1,24 @@
 locals {
-  tenant_id           = "d6d6228a-e151-4681-a6d9-15f173216357"
-  subscription_id     = "4147c8a6-6335-4feb-a202-42f97df0f3f5"
   resource_group_name = "example"
   location            = "japaneast"
+}
 
-  # auth0 settings
-  auth0_domain = "dev-al4ff38otkzu2mx6.us.auth0.com"
+variable "tenant_id" {
+  description = "The Azure tenant ID."
+  type        = string
+  sensitive   = true
+}
+
+variable "subscription_id" {
+  description = "The Azure subscription ID."
+  type        = string
+  sensitive   = true
+}
+
+variable "auth0_domain" {
+  description = "The Auth0 domain for the log stream."
+  type        = string
+  sensitive   = true
 }
 
 resource "azurerm_resource_group" "example" {
@@ -117,6 +130,12 @@ resource "azurerm_role_assignment" "log_storage_for_function" {
   principal_id         = azurerm_function_app_flex_consumption.example.identity[0].principal_id
 }
 
+resource "azurerm_role_assignment" "current_user_log_storage" {
+  role_definition_name = "Storage Blob Data Owner"
+  scope                = azurerm_storage_account.log.id
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
 resource "auth0_log_stream" "example" {
   name   = "Azure logs"
   type   = "eventgrid"
@@ -125,7 +144,7 @@ resource "auth0_log_stream" "example" {
   sink {
     azure_region          = local.location
     azure_resource_group  = azurerm_resource_group.example.name
-    azure_subscription_id = local.subscription_id
+    azure_subscription_id = var.subscription_id
   }
 
   depends_on = [azurerm_eventgrid_partner_configuration.example]
@@ -212,5 +231,16 @@ resource "terraform_data" "deploy_functions" {
 
   depends_on = [
     azurerm_role_assignment.storage_for_function,
+    azurerm_role_assignment.log_storage_for_function,
+    azurerm_role_assignment.current_user_storage,
+    azurerm_role_assignment.current_user_log_storage,
   ]
+}
+
+data "azurerm_client_config" "current" {}
+
+resource "azurerm_role_assignment" "current_user_storage" {
+  role_definition_name = "Storage Blob Data Owner"
+  scope                = azurerm_storage_account.example.id
+  principal_id         = data.azurerm_client_config.current.object_id
 }
